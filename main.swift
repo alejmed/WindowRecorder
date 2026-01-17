@@ -31,10 +31,10 @@ class WindowRecorderCore: NSObject, ObservableObject {
         configuration.showsCursor = false
         
         let desktopPath = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
-        let fileName = "Recording_\(Int(Date().timeIntervalSince1970)).mp4"
+        let fileName = "Recording_\(Int(Date().timeIntervalSince1970)).mov"
         recordingURL = desktopPath.appendingPathComponent(fileName)
         
-        assetWriter = try AVAssetWriter(outputURL: recordingURL!, fileType: .mp4)
+        assetWriter = try AVAssetWriter(outputURL: recordingURL!, fileType: .mov)
         
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -42,9 +42,23 @@ class WindowRecorderCore: NSObject, ObservableObject {
             AVVideoHeightKey: Int(window.frame.height),
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: 6000000,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                AVVideoH264EntropyModeKey: AVVideoH264EntropyModeCABAC,
+                AVVideoMaxKeyFrameIntervalKey: 30,
+                AVVideoExpectedSourceFrameRateKey: 30
             ]
         ]
+        
+        let pixelBufferAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: Int(window.frame.width),
+            kCVPixelBufferHeightKey as String: Int(window.frame.height)
+        ]
+        
+        pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput!,
+            sourcePixelBufferAttributes: pixelBufferAttributes
+        )
         
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput?.expectsMediaDataInRealTime = true
@@ -106,9 +120,15 @@ class WindowRecorderCore: NSObject, ObservableObject {
         }
     }
     
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    
     func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
         guard isRecording, videoInput?.isReadyForMoreMediaData == true else { return }
-        videoInput?.append(sampleBuffer)
+        
+        if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            if pixelBufferAdaptor?.append(pixelBuffer, withPresentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) == true {
+            }
+        }
     }
 }
 
