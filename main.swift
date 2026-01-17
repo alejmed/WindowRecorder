@@ -4,6 +4,7 @@ import AVFoundation
 import Foundation
 import SwiftUI
 import Combine
+import QuartzCore
 
 class WindowRecorderCore: NSObject, ObservableObject {
     @Published var isRecording = false
@@ -11,6 +12,7 @@ class WindowRecorderCore: NSObject, ObservableObject {
     
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var stream: SCStream?
     private var streamOutput: StreamCaptureHelper?
     
@@ -42,29 +44,26 @@ class WindowRecorderCore: NSObject, ObservableObject {
             AVVideoHeightKey: Int(window.frame.height),
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: 6000000,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoH264EntropyModeKey: AVVideoH264EntropyModeCABAC,
-                AVVideoMaxKeyFrameIntervalKey: 30,
-                AVVideoExpectedSourceFrameRateKey: 30
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
             ]
         ]
-        
-        let pixelBufferAttributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: Int(window.frame.width),
-            kCVPixelBufferHeightKey as String: Int(window.frame.height)
-        ]
-        
-        pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: videoInput!,
-            sourcePixelBufferAttributes: pixelBufferAttributes
-        )
         
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput?.expectsMediaDataInRealTime = true
         
-        if assetWriter?.canAdd(videoInput!) == true {
-            assetWriter?.add(videoInput!)
+        if let videoInput = videoInput, assetWriter?.canAdd(videoInput) == true {
+            assetWriter?.add(videoInput)
+            
+            let pixelBufferAttributes: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: Int(window.frame.width),
+                kCVPixelBufferHeightKey as String: Int(window.frame.height)
+            ]
+            
+            pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: videoInput,
+                sourcePixelBufferAttributes: pixelBufferAttributes
+            )
         } else {
             throw RecordingError.cannotAddVideoInput
         }
@@ -120,13 +119,12 @@ class WindowRecorderCore: NSObject, ObservableObject {
         }
     }
     
-    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
-    
     func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
-        guard isRecording, videoInput?.isReadyForMoreMediaData == true else { return }
+        guard isRecording, let pixelBufferAdaptor = pixelBufferAdaptor else { return }
         
-        if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            if pixelBufferAdaptor?.append(pixelBuffer, withPresentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) == true {
+        if pixelBufferAdaptor.assetWriterInput.isReadyForMoreMediaData == true {
+            if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             }
         }
     }
