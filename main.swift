@@ -3,10 +3,156 @@ import ScreenCaptureKit
 import AVFoundation
 import Foundation
 import SwiftUI
+import Combine
+
+class WindowRecorderCore: NSObject, ObservableObject {
+    @Published var isRecording = false
+    @Published var recordingURL: URL?
+    
+    private var assetWriter: AVAssetWriter?
+    private var videoInput: AVAssetWriterInput?
+    private var stream: SCStream?
+    private var streamOutput: StreamCaptureHelper?
+    
+    func startRecording(window: SCWindow) async throws {
+        guard !isRecording else { return }
+        
+        let availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = availableContent.displays.first else {
+            throw RecordingError.noDisplayAvailable
+        }
+        
+        let contentFilter = SCContentFilter(display: display, excludingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.width = Int(window.frame.width)
+        configuration.height = Int(window.frame.height)
+        configuration.sourceRect = window.frame
+        configuration.capturesAudio = false
+        configuration.showsCursor = false
+        
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let fileName = "Recording_\(Int(Date().timeIntervalSince1970)).mp4"
+        recordingURL = documentsPath.appendingPathComponent(fileName)
+        
+        assetWriter = try AVAssetWriter(outputURL: recordingURL!, fileType: .mp4)
+        
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(window.frame.width),
+            AVVideoHeightKey: Int(window.frame.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 6000000,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
+        ]
+        
+        videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput?.expectsMediaDataInRealTime = true
+        
+        if assetWriter?.canAdd(videoInput!) == true {
+            assetWriter?.add(videoInput!)
+        } else {
+            throw RecordingError.cannotAddVideoInput
+        }
+        
+        stream = SCStream(filter: contentFilter, configuration: configuration, delegate: self)
+        streamOutput = StreamCaptureHelper()
+        streamOutput?.recorder = self
+        
+        try stream?.addStreamOutput(streamOutput!, type: .screen, sampleHandlerQueue: DispatchQueue(label: "recording.queue"))
+        try await stream?.startCapture()
+        
+        if assetWriter?.startWriting() == true {
+            assetWriter?.startSession(atSourceTime: .zero)
+            await MainActor.run {
+                isRecording = true
+            }
+        } else {
+            throw RecordingError.cannotStartWriting
+        }
+        
+        print("🎬 Recording started: \(recordingURL!.path)")
+    }
+    
+    func stopRecording() async {
+        guard isRecording else { return }
+        
+        do {
+            try await stream?.stopCapture()
+        } catch {
+            print("Error stopping stream: \(error)")
+        }
+        
+        videoInput?.markAsFinished()
+        await assetWriter?.finishWriting()
+        
+        await MainActor.run {
+            isRecording = false
+            if let url = recordingURL {
+                print("✅ Recording saved: \(url.path)")
+                
+                let alert = NSAlert()
+                alert.messageText = "Recording Complete"
+                alert.informativeText = "Recording saved to Documents folder:\n\(url.lastPathComponent)"
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Show in Finder")
+                
+                let response = alert.runModal()
+                if response == .alertSecondButtonReturn {
+                    NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
+                }
+            }
+        }
+    }
+    
+    func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard isRecording, videoInput?.isReadyForMoreMediaData == true else { return }
+        videoInput?.append(sampleBuffer)
+    }
+}
+
+extension WindowRecorderCore: SCStreamDelegate {
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        print("Stream stopped with error: \(error)")
+        Task {
+            await MainActor.run {
+                isRecording = false
+            }
+        }
+    }
+}
+
+class StreamCaptureHelper: NSObject, SCStreamOutput {
+    weak var recorder: WindowRecorderCore?
+    
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen else { return }
+        recorder?.handleSampleBuffer(sampleBuffer)
+    }
+}
+
+enum RecordingError: Error, LocalizedError {
+    case noDisplayAvailable
+    case cannotAddVideoInput
+    case cannotStartWriting
+    
+    var errorDescription: String? {
+        switch self {
+        case .noDisplayAvailable:
+            return "No display available for recording"
+        case .cannotAddVideoInput:
+            return "Cannot add video input to asset writer"
+        case .cannotStartWriting:
+            return "Cannot start asset writer"
+        }
+    }
+}
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var window: NSWindow?
+    var recorder: WindowRecorderCore?
     
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -41,7 +187,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window?.title = "Window Recorder"
         window?.center()
         
-        let contentView = MainView()
+        let recorder = WindowRecorderCore()
+        let contentView = MainView(recorder: recorder)
         let hostingView = NSHostingView(rootView: contentView)
         window?.contentView = hostingView
         
@@ -60,9 +207,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 struct MainView: View {
+    @ObservedObject var recorder: WindowRecorderCore
     @State private var availableWindows: [SCWindow] = []
     @State private var selectedWindow: SCWindow?
-    @State private var isRecording = false
     @State private var errorMessage = ""
     @State private var showingError = false
     @State private var isLoading = false
@@ -77,7 +224,7 @@ struct MainView: View {
             if isLoading {
                 ProgressView("Loading windows...")
                     .padding()
-            } else if isRecording {
+            } else if recorder.isRecording {
                 recordingView
             } else {
                 setupView
@@ -215,46 +362,18 @@ struct MainView: View {
         selectedWindow = window
         
         do {
-            let availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let display = availableContent.displays.first else {
-                throw NSError(domain: "Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available"])
-            }
-            
-            let configuration = SCStreamConfiguration()
-            configuration.width = Int(window.frame.width)
-            configuration.height = Int(window.frame.height)
-            configuration.sourceRect = window.frame
-            configuration.capturesAudio = false
-            configuration.showsCursor = false
-            
-            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let fileName = "Recording_\(Date().timeIntervalSince1970).mp4"
-            let recordingURL = documentsPath.appendingPathComponent(fileName)
-            
-            print("🎬 Starting recording to: \(recordingURL.path)")
-            print("📱 Window: \(window.title ?? "Unknown")")
-            print("🖥️  Size: \(window.frame.width) x \(window.frame.height)")
-            
-            isRecording = true
-            
+            try await recorder.startRecording(window: window)
         } catch {
             errorMessage = "Failed to start recording: \(error.localizedDescription)"
             showingError = true
-            isRecording = false
         }
     }
     
     func stopRecording() {
-        isRecording = false
-        selectedWindow = nil
-        print("🛑 Recording stopped")
-        
-        let alert = NSAlert()
-        alert.messageText = "Recording Complete"
-        alert.informativeText = "Your recording has been saved to the Documents folder."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        Task {
+            await recorder.stopRecording()
+            selectedWindow = nil
+        }
     }
 }
 
