@@ -30,9 +30,9 @@ class WindowRecorderCore: NSObject, ObservableObject {
         configuration.capturesAudio = false
         configuration.showsCursor = false
         
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let desktopPath = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
         let fileName = "Recording_\(Int(Date().timeIntervalSince1970)).mp4"
-        recordingURL = documentsPath.appendingPathComponent(fileName)
+        recordingURL = desktopPath.appendingPathComponent(fileName)
         
         assetWriter = try AVAssetWriter(outputURL: recordingURL!, fileType: .mp4)
         
@@ -93,7 +93,7 @@ class WindowRecorderCore: NSObject, ObservableObject {
                 
                 let alert = NSAlert()
                 alert.messageText = "Recording Complete"
-                alert.informativeText = "Recording saved to Documents folder:\n\(url.lastPathComponent)"
+                alert.informativeText = "Recording saved to Desktop:\n\(url.lastPathComponent)"
                 alert.alertStyle = .informational
                 alert.addButton(withTitle: "OK")
                 alert.addButton(withTitle: "Show in Finder")
